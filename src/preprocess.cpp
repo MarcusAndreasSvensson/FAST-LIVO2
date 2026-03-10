@@ -521,28 +521,27 @@ void Preprocess::Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSha
   pl_surf.reserve(plsize);
 
   double time_head = pl_orig.points[0].timestamp;
+  constexpr double max_range_sqr = 300.0 * 300.0;
   for (int i = 0; i < plsize; i++)
   {
-    PointType added_pt;
+    if (i % point_filter_num != 0) continue;
 
+    const auto& pt = pl_orig.points[i];
+    const double x = pt.x, y = pt.y, z = pt.z;
+    const double dist_sqr = x * x + y * y + z * z;
+    if (dist_sqr < blind_sqr || dist_sqr > max_range_sqr) continue;
+    if (std::isnan(x) || std::isnan(y) || std::isnan(z)) continue;
+
+    PointType added_pt;
     added_pt.normal_x = 0;
     added_pt.normal_y = 0;
     added_pt.normal_z = 0;
-    added_pt.x = pl_orig.points[i].x;
-    added_pt.y = pl_orig.points[i].y;
-    added_pt.z = pl_orig.points[i].z;
-    added_pt.intensity = static_cast<float>(pl_orig.points[i].intensity) / 255.0f;
-    added_pt.curvature = (pl_orig.points[i].timestamp - time_head) * 1000.f;
-
-    if (i % point_filter_num == 0)
-    {
-      if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > blind_sqr)
-      {
-        pl_surf.points.push_back(added_pt);
-        // printf("time mode: %d time: %d \n", given_offset_time,
-        // pl_orig.points[i].t);
-      }
-    }
+    added_pt.x = x;
+    added_pt.y = y;
+    added_pt.z = z;
+    added_pt.intensity = static_cast<float>(pt.intensity) / 255.0f;
+    added_pt.curvature = (pt.timestamp - time_head) * 1000.f;
+    pl_surf.points.push_back(added_pt);
   }
 
   // define a lambda function for the comparison

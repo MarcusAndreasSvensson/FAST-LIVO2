@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <filesystem>
 
 using namespace Eigen;
 VIOManager::VIOManager()
@@ -126,22 +127,7 @@ void VIOManager::initializeVIO()
     // cv::waitKey(1);
   }
 
-  if(colmap_output_en)
-  {
-    pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
-    fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
-    fout_colmap << "# Image list with two lines of data per image:\n";
-    fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
-    fout_colmap << "#   POINTS2D[] as (X, Y, POINT3D_ID)\n";
-    fout_camera.open(DEBUG_FILE_DIR("Colmap/sparse/0/cameras.txt"), ios::out);
-    fout_camera << "# Camera list with one line of data per camera:\n";
-    fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
-    fout_camera << "1 PINHOLE " << width << " " << height << " "
-        << std::fixed << std::setprecision(6)  // 控制浮点数精度为10位
-        << fx << " " << fy << " "
-        << cx << " " << cy << std::endl;
-    fout_camera.close();
-  }
+  
   grid_num.resize(length);
   map_index.resize(length);
   map_dist.resize(length);
@@ -208,6 +194,20 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   const int scale = (1 << level);
   const int u_ref_i = floorf(pc[0] / scale) * scale;
   const int v_ref_i = floorf(pc[1] / scale) * scale;
+  
+  // Bounds check to prevent out-of-bounds memory access
+  int min_row = v_ref_i - patch_size_half * scale;
+  int max_row = v_ref_i + patch_size_half * scale + scale;
+  int min_col = u_ref_i - patch_size_half * scale;
+  int max_col = u_ref_i + patch_size_half * scale + scale;
+  
+  if (min_row < 0 || max_row >= img.rows || min_col < 0 || max_col >= img.cols)
+  {
+    // Fill with zeros if out of bounds
+    std::fill(patch_tmp + patch_size_total * level, patch_tmp + patch_size_total * (level + 1), 0.0f);
+    return;
+  }
+  
   const float subpix_u_ref = (u_ref - u_ref_i) / scale;
   const float subpix_v_ref = (v_ref - v_ref_i) / scale;
   const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -923,6 +923,13 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     }
 
     V2D pc(new_frame_->w2c(pt->pos_));
+    
+    // Skip points that project outside the image with border margin
+    if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border))
+    {
+      continue;
+    }
+    
     bool add_flag = false;
     
     float *patch_temp = new float[patch_size_total];
@@ -1106,7 +1113,7 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
   // if(new_frame_->id_ != 2) return; //124
 
   int patch_size = 25;
-  string dir = string(ROOT_DIR) + "Log/ref_cur_combine/";
+  string dir = output_dir + "ref_cur_combine/";
 
   cv::Mat result = cv::Mat::zeros(height, width, CV_8UC1);
   cv::Mat result_normal = cv::Mat::zeros(height, width, CV_8UC1);
@@ -1760,72 +1767,222 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
   return pixel;
 }
 
+void VIOManager::finalizeColmapSetup()
+{
+  if (!colmap_output_en) return;
+
+  namespace fs = std::filesystem;
+  fs::create_directories(output_dir + "Colmap/sparse/0");
+  fs::create_directories(output_dir + "Colmap/images/top");
+  fs::create_directories(output_dir + "ref_cur_combine");
+  for (const auto &ec : extra_cameras)
+    fs::create_directories(output_dir + "Colmap/images/" + ec->name);
+
+  for (const auto& subdir : {"Colmap/images", "Colmap/sparse/0"}) {
+    fs::path dir = fs::path(output_dir) / subdir;
+    if (!fs::exists(dir)) continue;
+    for (auto& entry : fs::directory_iterator(dir))
+      fs::remove_all(entry.path());
+  }
+
+  fs::create_directories(output_dir + "Colmap/images/top");
+  for (const auto &ec : extra_cameras)
+    fs::create_directories(output_dir + "Colmap/images/" + ec->name);
+
+  fout_colmap.open(output_dir + "Colmap/sparse/0/images.txt", std::ios::out);
+  fout_colmap << "# Image list with two lines of data per image:\n";
+  fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
+  fout_colmap << "#   POINTS2D[] as (X, Y, POINT3D_ID)\n";
+
+  num_total_cameras = 1 + static_cast<int>(extra_cameras.size());
+
+  std::ofstream fout_camera(output_dir + "Colmap/sparse/0/cameras.txt", std::ios::out);
+  fout_camera << "# Camera list with one line of data per camera:\n";
+  fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
+  fout_camera << std::fixed << std::setprecision(6);
+  fout_camera << "1 PINHOLE " << width << " " << height << " "
+      << fx << " " << fy << " "
+      << cx << " " << cy << std::endl;
+  for (int i = 0; i < static_cast<int>(extra_cameras.size()); i++)
+  {
+    const auto &ec = *extra_cameras[i];
+    fout_camera << (i + 2) << " PINHOLE " << ec.width << " " << ec.height << " "
+        << ec.fx << " " << ec.fy << " " << ec.cx << " " << ec.cy << std::endl;
+  }
+  fout_camera.close();
+}
+
 void VIOManager::dumpDataForColmap()
 {
-  static int cnt = 1;
+  colmap_frame_num++;
   std::ostringstream ss;
-  ss << std::setw(5) << std::setfill('0') << cnt;
+  ss << std::setw(5) << std::setfill('0') << colmap_frame_num;
   std::string cnt_str = ss.str();
-  std::string image_path = std::string(ROOT_DIR) + "Log/Colmap/images/" + cnt_str + ".png";
-  
+  std::string image_path = output_dir + "Colmap/images/top/" + cnt_str + ".png";
+
   cv::Mat img_rgb_undistort;
-  pinhole_cam->undistortImage(img_rgb, img_rgb_undistort);
+  cam->undistortImage(img_rgb, img_rgb_undistort);
   cv::imwrite(image_path, img_rgb_undistort);
-  
+
+  int image_id = (colmap_frame_num - 1) * num_total_cameras + 1;
   Eigen::Quaterniond q(new_frame_->T_f_w_.rotationMatrix());
   Eigen::Vector3d t = new_frame_->T_f_w_.translation();
-  fout_colmap << cnt << " "
-            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6位
-            << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
-            << t.x() << " " << t.y() << " " << t.z() << " "
-            << 1 << " "  // CAMERA_ID (假设相机ID为1)
-            << cnt_str << ".png" << std::endl;
+  fout_colmap << image_id << " "
+              << std::fixed << std::setprecision(6)
+              << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
+              << t.x() << " " << t.y() << " " << t.z() << " "
+              << 1 << " "
+              << "top/" << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
-  cnt++;
+}
+
+void VIOManager::dumpExtraCamerasForColmap(const StatesGroup &st, double vio_time)
+{
+  if (!colmap_output_en || extra_cameras.empty()) return;
+
+  constexpr double kMaxTimeDiff = 0.10;
+
+  M3D Rwi(st.rot_end);
+  V3D Pwi(st.pos_end);
+
+  std::ostringstream ss;
+  ss << std::setw(5) << std::setfill('0') << colmap_frame_num;
+  const std::string cnt_str = ss.str();
+
+  std::unique_lock<std::mutex> lock(extra_cam_mtx);
+
+  for (int i = 0; i < static_cast<int>(extra_cameras.size()); i++)
+  {
+    auto &ec = *extra_cameras[i];
+
+    if (ec.img_time_buffer.empty()) continue;
+
+    // Find index of closest timestamp in buffer
+    int best_idx = -1;
+    double best_diff = std::numeric_limits<double>::max();
+    for (int j = 0; j < static_cast<int>(ec.img_time_buffer.size()); j++)
+    {
+      double diff = std::abs(ec.img_time_buffer[j] - vio_time);
+      if (diff < best_diff) { best_diff = diff; best_idx = j; }
+    }
+
+    if (best_idx < 0 || best_diff > kMaxTimeDiff)
+    {
+      printf("[multicam] Camera '%s': no matching frame (best_diff=%.3fs, vio_time=%.6f)\n",
+             ec.name.c_str(), best_diff, vio_time);
+      continue;
+    }
+
+    cv::Mat matched_img = ec.img_buffer[best_idx].clone();
+
+    // Prune all frames up to and including the matched one
+    ec.img_buffer.erase(ec.img_buffer.begin(), ec.img_buffer.begin() + best_idx + 1);
+    ec.img_time_buffer.erase(ec.img_time_buffer.begin(), ec.img_time_buffer.begin() + best_idx + 1);
+
+    lock.unlock();
+
+    // Compute world-to-camera pose for this extra camera
+    // Rcw_X = Rci_X * Rwi^T,  Pcw_X = -Rci_X * Rwi^T * Pwi + Pci_X
+    M3D Rcw = ec.Rci * Rwi.transpose();
+    V3D Pcw = -ec.Rci * Rwi.transpose() * Pwi + ec.Pci;
+    Eigen::Quaterniond q(Rcw);
+    q.normalize();
+
+    // Undistort and save image
+    std::string image_path = output_dir + "Colmap/images/" + ec.name + "/" + cnt_str + ".png";
+    cv::Mat img_undistort;
+    if (ec.cam)
+      ec.cam->undistortImage(matched_img, img_undistort);
+    else
+      img_undistort = matched_img;
+    cv::imwrite(image_path, img_undistort);
+
+    int image_id = (colmap_frame_num - 1) * num_total_cameras + (i + 2);
+    fout_colmap << image_id << " "
+                << std::fixed << std::setprecision(6)
+                << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
+                << Pcw.x() << " " << Pcw.y() << " " << Pcw.z() << " "
+                << (i + 2) << " "
+                << ec.name << "/" << cnt_str << ".png" << std::endl;
+    fout_colmap << "0.0 0.0 -1" << std::endl;
+
+    lock.lock();
+  }
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  // Validate input image
+  if (img.empty())
+  {
+    printf("[ VIO ] ERROR: Empty Image received!\n");
+    return;
+  }
+  
+  if (img.data == nullptr)
+  {
+    printf("[ VIO ] ERROR: Image data is null!\n");
+    return;
+  }
+  
+  printf("[ VIO ] Processing image: %dx%d, channels=%d, type=%d\n", img.cols, img.rows, img.channels(), img.type());
+  fflush(stdout);
+  
   if (width != img.cols || height != img.rows)
   {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+    printf("[ VIO ] Resizing image from %dx%d to %dx%d\n", img.cols, img.rows, 
+           (int)(img.cols * image_resize_factor), (int)(img.rows * image_resize_factor));
+    fflush(stdout);
+    cv::Mat img_resized;
+    cv::resize(img, img_resized, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, cv::INTER_LINEAR);
+    img = img_resized;
   }
+  
+  printf("[ VIO ] step: clone\n"); fflush(stdout);
   img_rgb = img.clone();
   img_cp = img.clone();
-  // img_test = img.clone();
 
+  printf("[ VIO ] step: grayscale\n"); fflush(stdout);
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
+  printf("[ VIO ] step: Frame(%dx%d expect %dx%d)\n", img.cols, img.rows, cam->width(), cam->height()); fflush(stdout);
   new_frame_.reset(new Frame(cam, img));
+  printf("[ VIO ] step: updateFrameState\n"); fflush(stdout);
   updateFrameState(*state);
   
+  printf("[ VIO ] step: resetGrid (length=%d)\n", length); fflush(stdout);
   resetGrid();
 
   double t1 = omp_get_wtime();
 
+  printf("[ VIO ] step: retrieveFromVisualSparseMap (feat_map member=%zu, pg=%zu)\n", this->feat_map.size(), pg.size()); fflush(stdout);
   retrieveFromVisualSparseMap(img, pg, feat_map);
 
   double t2 = omp_get_wtime();
 
+  printf("[ VIO ] step: computeJacobianAndUpdateEKF (total_points=%d)\n", total_points); fflush(stdout);
   computeJacobianAndUpdateEKF(img);
 
   double t3 = omp_get_wtime();
 
+  printf("[ VIO ] step: generateVisualMapPoints (pg=%zu)\n", pg.size()); fflush(stdout);
   generateVisualMapPoints(img, pg);
 
   double t4 = omp_get_wtime();
   
+  printf("[ VIO ] step: plotTrackedPoints\n"); fflush(stdout);
   plotTrackedPoints();
 
   if (plot_flag) projectPatchFromRefToCur(feat_map);
 
   double t5 = omp_get_wtime();
 
+  printf("[ VIO ] step: updateVisualMapPoints\n"); fflush(stdout);
   updateVisualMapPoints(img);
 
   double t6 = omp_get_wtime();
 
+  printf("[ VIO ] step: updateReferencePatch\n"); fflush(stdout);
   updateReferencePatch(feat_map);
 
   double t7 = omp_get_wtime();

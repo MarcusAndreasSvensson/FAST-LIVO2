@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    cam_model: Pinhole
+    cam_width: 960
+    cam_height: 540
+    scale: 1.0
+    cam_fx: 571.865756
+    cam_fy: 561.531203
+    cam_cx: 474.411449
+    cam_cy: 251.978466
+    cam_d0: 0.028413
+    cam_d1: -0.040159
+    cam_d2: 0.000290
+    cam_d3: -0.000087

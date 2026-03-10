@@ -50,6 +50,7 @@ public:
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
 
   ofstream fout_imu;
+  string output_dir;
   double IMU_mean_acc_norm;
   V3D unbiased_gyr;
 

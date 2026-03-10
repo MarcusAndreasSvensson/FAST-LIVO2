@@ -579,7 +579,7 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
       RCLCPP_INFO(rclcpp::get_logger(""), "IMU Initials: ba covarience: %.8f %.8f %.8f; bg covarience: "
                "%.8f %.8f %.8f",
                cov_bias_acc[0], cov_bias_acc[1], cov_bias_acc[2], cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2]);
-      fout_imu.open(DEBUG_FILE_DIR("imu.txt"), ios::out);
+      fout_imu.open(output_dir + "imu.txt", ios::out);
     }
 
     return;

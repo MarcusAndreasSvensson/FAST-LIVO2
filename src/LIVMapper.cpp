@@ -12,6 +12,7 @@ which is included as part of this source code package.
 
 #include "LIVMapper.h"
 #include <vikit/camera_loader.h>
+#include <filesystem>
 
 using namespace Sophus;
 LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name)
@@ -59,6 +60,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->declare_parameter<int>("common.img_en", 1);
   this->node->declare_parameter<int>("common.lidar_en", 1);
   this->node->declare_parameter<std::string>("common.img_topic", "/left_camera/image");
+  this->node->declare_parameter<std::string>("common.output_dir", "");
 
   this->node->declare_parameter<bool>("vio.normal_en", true);
   this->node->declare_parameter<bool>("vio.inverse_composition_en", false);
@@ -116,6 +118,28 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->declare_parameter<bool>("publish.pub_effect_point_en", false);
   this->node->declare_parameter<bool>("publish.dense_map_en", false);
 
+  this->node->declare_parameter<bool>("multicam.enabled", false);
+  this->node->declare_parameter<int>("multicam.num_extra_cameras", 0);
+  for (int i = 0; i < 8; i++)
+  {
+    const std::string pfx = "multicam.cam_" + std::to_string(i) + "_";
+    this->node->declare_parameter<std::string>(pfx + "name", "");
+    this->node->declare_parameter<std::string>(pfx + "img_topic", "");
+    this->node->declare_parameter<vector<double>>(pfx + "Rcl", vector<double>{});
+    this->node->declare_parameter<vector<double>>(pfx + "Pcl", vector<double>{});
+    this->node->declare_parameter<int>(pfx + "cam_width", 0);
+    this->node->declare_parameter<int>(pfx + "cam_height", 0);
+    this->node->declare_parameter<double>(pfx + "cam_fx", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_fy", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_cx", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_cy", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_d0", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_d1", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_d2", 0.0);
+    this->node->declare_parameter<double>(pfx + "cam_d3", 0.0);
+    this->node->declare_parameter<double>(pfx + "img_time_offset", 0.0);
+  }
+
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
   this->node->get_parameter("common.imu_topic", imu_topic);
@@ -123,6 +147,13 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("common.img_en", img_en);
   this->node->get_parameter("common.lidar_en", lidar_en);
   this->node->get_parameter("common.img_topic", img_topic);
+  this->node->get_parameter("common.output_dir", output_dir);
+  if (output_dir.empty()) {
+    output_dir = std::string(ROOT_DIR) + "Log/";
+  }
+  if (output_dir.back() != '/') {
+    output_dir += '/';
+  }
 
   this->node->get_parameter("vio.normal_en", normal_en);
   this->node->get_parameter("vio.inverse_composition_en", inverse_composition_en);
@@ -153,6 +184,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("imu.ba_bg_est_en", ba_bg_est_en);
 
   this->node->get_parameter("preprocess.blind", p_pre->blind);
+  p_pre->blind_sqr = p_pre->blind * p_pre->blind;
   this->node->get_parameter("preprocess.filter_size_surf", filter_size_surf_min);
   this->node->get_parameter("preprocess.lidar_type", p_pre->lidar_type);
   this->node->get_parameter("preprocess.scan_line", p_pre->N_SCANS);
@@ -174,6 +206,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
   this->node->get_parameter("publish.pub_effect_point_en", pub_effect_point_en);
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
+
+  this->node->get_parameter("multicam.enabled", multicam_enabled);
+  this->node->get_parameter("multicam.num_extra_cameras", num_extra_cameras);
 }
 
 void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node) 
@@ -210,7 +245,67 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
+  vio_manager->output_dir = output_dir;
   vio_manager->initializeVIO();
+
+  if (multicam_enabled && num_extra_cameras > 0)
+  {
+    for (int i = 0; i < num_extra_cameras; i++)
+    {
+      const std::string pfx = "multicam.cam_" + std::to_string(i) + "_";
+
+      auto ec = std::make_unique<ExtraCamera>();
+
+      this->node->get_parameter(pfx + "name", ec->name);
+      this->node->get_parameter(pfx + "img_topic", ec->img_topic);
+
+      vector<double> ec_Rcl_vec, ec_Pcl_vec;
+      this->node->get_parameter(pfx + "Rcl", ec_Rcl_vec);
+      this->node->get_parameter(pfx + "Pcl", ec_Pcl_vec);
+
+      if (ec_Rcl_vec.size() == 9) ec->Rcl << MAT_FROM_ARRAY(ec_Rcl_vec);
+      if (ec_Pcl_vec.size() == 3) ec->Pcl << VEC_FROM_ARRAY(ec_Pcl_vec);
+
+      // Rci_X = Rcl_X * Rli;  Pci_X = Rcl_X * Pli + Pcl_X
+      ec->Rci = ec->Rcl * vio_manager->Rli;
+      ec->Pci = ec->Rcl * vio_manager->Pli + ec->Pcl;
+
+      int cam_w = 0, cam_h = 0;
+      double cam_fx = 0, cam_fy = 0, cam_cx = 0, cam_cy = 0;
+      double cam_d0 = 0, cam_d1 = 0, cam_d2 = 0, cam_d3 = 0;
+      this->node->get_parameter(pfx + "cam_width",  cam_w);
+      this->node->get_parameter(pfx + "cam_height", cam_h);
+      this->node->get_parameter(pfx + "cam_fx", cam_fx);
+      this->node->get_parameter(pfx + "cam_fy", cam_fy);
+      this->node->get_parameter(pfx + "cam_cx", cam_cx);
+      this->node->get_parameter(pfx + "cam_cy", cam_cy);
+      this->node->get_parameter(pfx + "cam_d0", cam_d0);
+      this->node->get_parameter(pfx + "cam_d1", cam_d1);
+      this->node->get_parameter(pfx + "cam_d2", cam_d2);
+      this->node->get_parameter(pfx + "cam_d3", cam_d3);
+      this->node->get_parameter(pfx + "img_time_offset", ec->img_time_offset);
+
+      ec->width  = cam_w;
+      ec->height = cam_h;
+      ec->fx = cam_fx; ec->fy = cam_fy;
+      ec->cx = cam_cx; ec->cy = cam_cy;
+      ec->cam = new vk::PinholeCamera(cam_w, cam_h, 1.0,
+                                      cam_fx, cam_fy, cam_cx, cam_cy,
+                                      cam_d0, cam_d1, cam_d2, cam_d3);
+
+      RCLCPP_INFO(this->node->get_logger(),
+                  "[multicam] Camera %d '%s' topic=%s size=%dx%d fx=%.2f fy=%.2f time_offset=%.4f",
+                  i, ec->name.c_str(), ec->img_topic.c_str(), cam_w, cam_h, cam_fx, cam_fy, ec->img_time_offset);
+
+      vio_manager->extra_cameras.push_back(std::move(ec));
+    }
+    RCLCPP_INFO(this->node->get_logger(), "[multicam] %zu extra cameras configured, total=%d",
+                vio_manager->extra_cameras.size(),
+                1 + static_cast<int>(vio_manager->extra_cameras.size()));
+  }
+
+  vio_manager->finalizeColmapSetup();
+  if (colmap_output_en) fout_points.open(output_dir + "Colmap/sparse/0/points3D.txt", std::ios::out);
 
   p_imu->set_extrinsic(extT, extR);
   p_imu->set_gyr_cov_scale(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -219,6 +314,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   p_imu->set_gyr_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_acc_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_imu_init_frame_num(imu_int_frame);
+  p_imu->output_dir = output_dir;
 
   if (!imu_en) p_imu->disable_imu();
   if (!gravity_est_en) p_imu->disable_gravity_est();
@@ -230,29 +326,16 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
 
 void LIVMapper::initializeFiles() 
 {
-  if (pcd_save_en && colmap_output_en)
-  {
-      const std::string folderPath = std::string(ROOT_DIR) + "/scripts/colmap_output.sh";
-      
-      std::string chmodCommand = "chmod +x " + folderPath;
-      
-      int chmodRet = system(chmodCommand.c_str());  
-      if (chmodRet != 0) {
-          std::cerr << "Failed to set execute permissions for the script." << std::endl;
-          return;
-      }
-
-      int executionRet = system(folderPath.c_str());
-      if (executionRet != 0) {
-          std::cerr << "Failed to execute the script." << std::endl;
-          return;
-      }
-  }
-  if(colmap_output_en) fout_points.open(std::string(ROOT_DIR) + "Log/Colmap/sparse/0/points3D.txt", std::ios::out);
-  if(pcd_save_en) fout_lidar_pos.open(std::string(ROOT_DIR) + "Log/pcd/lidar_poses.txt", std::ios::out);
-  if(img_save_en) fout_visual_pos.open(std::string(ROOT_DIR) + "Log/image/image_poses.txt", std::ios::out);
-  fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
-  fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
+  namespace fs = std::filesystem;
+  fs::create_directories(output_dir);
+  if (pcd_save_en)    fs::create_directories(output_dir + "pcd");
+  if (img_save_en)    fs::create_directories(output_dir + "image");
+  if (pose_output_en) fs::create_directories(output_dir + "result");
+  RCLCPP_INFO(this->node->get_logger(), "Output directory: %s", output_dir.c_str());
+  if(pcd_save_en) fout_lidar_pos.open(output_dir + "pcd/lidar_poses.txt", std::ios::out);
+  if(img_save_en) fout_visual_pos.open(output_dir + "image/image_poses.txt", std::ios::out);
+  fout_pre.open(output_dir + "mat_pre.txt", std::ios::out);
+  fout_out.open(output_dir + "mat_out.txt", std::ios::out);
 }
 
 void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node, image_transport::ImageTransport &it_)
@@ -265,7 +348,33 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
   }
   sub_imu = this->node->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 200000, std::bind(&LIVMapper::imu_cbk, this, std::placeholders::_1));
   sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(img_topic, 200000, std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
-  
+
+  if (multicam_enabled)
+  {
+    for (int ci = 0; ci < static_cast<int>(vio_manager->extra_cameras.size()); ci++)
+    {
+      const std::string topic = vio_manager->extra_cameras[ci]->img_topic;
+      auto sub = this->node->create_subscription<sensor_msgs::msg::Image>(
+          topic, 200000,
+          [this, ci](const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+          {
+            double msg_time = stamp2Sec(msg_in->header.stamp) + vio_manager->extra_cameras[ci]->img_time_offset;
+            auto &ec = *vio_manager->extra_cameras[ci];
+            {
+              std::lock_guard<std::mutex> lock(vio_manager->extra_cam_mtx);
+              if (!ec.img_time_buffer.empty() &&
+                  std::abs(msg_time - ec.img_time_buffer.back()) < 0.001)
+                return;
+              cv::Mat img = getImageFromMsg(msg_in);
+              ec.img_buffer.push_back(img);
+              ec.img_time_buffer.push_back(msg_time);
+            }
+          });
+      extra_img_subs.push_back(sub);
+      RCLCPP_INFO(this->node->get_logger(), "[multicam] Subscribed to extra camera %d: %s", ci, topic.c_str());
+    }
+  }
+
   pubLaserCloudFullRes = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pubNormal = this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/visualization_marker", 100);
   pubSubVisualMap = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_visual_sub_map_before", 100);
@@ -371,7 +480,24 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
-  vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  auto &vio_img = LidarMeasures.measures.back().img;
+  printf("[ VIO ] measures size: %zu, img: %dx%d type=%d empty=%d pv_list: %zu voxel_map: %zu\n",
+         LidarMeasures.measures.size(), vio_img.cols, vio_img.rows, vio_img.type(),
+         vio_img.empty() ? 1 : 0, _pv_list.size(), voxelmap_manager->voxel_map_.size());
+  fflush(stdout);
+
+  try {
+    vio_manager->processFrame(vio_img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  } catch (const std::exception &e) {
+    printf("[ VIO ] EXCEPTION in processFrame: %s\n", e.what());
+    fflush(stdout);
+    return;
+  }
+
+  if (colmap_output_en && multicam_enabled)
+  {
+    vio_manager->dumpExtraCamerasForColmap(_state, LidarMeasures.measures.back().vio_time);
+  }
 
   if (imu_prop_enable) 
   {
@@ -457,13 +583,13 @@ void LIVMapper::handleLIO()
     std::ofstream outFile, evoFile;
     if (!pos_opend) 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
+      evoFile.open(output_dir + "result/" + seq_name + ".txt", std::ios::out);
       pos_opend = true;
       if (!evoFile.is_open()) RCLCPP_ERROR(this->node->get_logger(), "open fail\n");
     } 
     else 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
+      evoFile.open(output_dir + "result/" + seq_name + ".txt", std::ios::app);
       if (!evoFile.is_open()) RCLCPP_ERROR(this->node->get_logger(), "open fail\n");
     }
     Eigen::Matrix4d outT;
@@ -552,51 +678,84 @@ void LIVMapper::handleLIO()
 
 void LIVMapper::savePCD() 
 {
-  if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval < 0) 
-  {
-    std::string raw_points_dir = std::string(ROOT_DIR) + "Log/pcd/all_raw_points.pcd";
-    std::string downsampled_points_dir = std::string(ROOT_DIR) + "Log/pcd/all_downsampled_points.pcd";
-    pcl::PCDWriter pcd_writer;
+  bool has_points = pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0;
+  if (!has_points || pcd_save_interval >= 0) return;
+  if (!pcd_save_en && !colmap_output_en) return;
 
-    if (img_en)
+  auto removeInvalidRGB = [](pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud) {
+    constexpr float max_coord = 1e6f;
+    cloud->points.erase(
+      std::remove_if(cloud->points.begin(), cloud->points.end(),
+        [max_coord](const pcl::PointXYZRGB &p) {
+          return !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)
+              || std::abs(p.x) > max_coord || std::abs(p.y) > max_coord || std::abs(p.z) > max_coord;
+        }),
+      cloud->points.end());
+    cloud->width = cloud->points.size();
+    cloud->height = 1;
+  };
+
+  if (img_en)
+  {
+    removeInvalidRGB(pcl_wait_save);
+
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
+    voxel_filter.setInputCloud(pcl_wait_save);
+    voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
+    voxel_filter.filter(*downsampled_cloud);
+
+    if (pcd_save_en)
     {
-      pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-      pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
-      voxel_filter.setInputCloud(pcl_wait_save);
-      voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-      voxel_filter.filter(*downsampled_cloud);
-  
-      pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save); // Save the raw point cloud data
+      std::string raw_points_dir = output_dir + "pcd/all_raw_points.pcd";
+      std::string downsampled_points_dir = output_dir + "pcd/all_downsampled_points.pcd";
+      pcl::PCDWriter pcd_writer;
+
+      pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save);
       std::cout << GREEN << "Raw point cloud data saved to: " << raw_points_dir 
                 << " with point count: " << pcl_wait_save->points.size() << RESET << std::endl;
       
-      pcd_writer.writeBinary(downsampled_points_dir, *downsampled_cloud); // Save the downsampled point cloud data
+      pcd_writer.writeBinary(downsampled_points_dir, *downsampled_cloud);
       std::cout << GREEN << "Downsampled point cloud data saved to: " << downsampled_points_dir 
                 << " with point count after filtering: " << downsampled_cloud->points.size() << RESET << std::endl;
+    }
 
-      if(colmap_output_en)
+    if (colmap_output_en)
+    {
+      fout_points << "# 3D point list with one line of data per point\n";
+      fout_points << "#  POINT_ID, X, Y, Z, R, G, B, ERROR\n";
+      for (size_t i = 0; i < downsampled_cloud->size(); ++i) 
       {
-        fout_points << "# 3D point list with one line of data per point\n";
-        fout_points << "#  POINT_ID, X, Y, Z, R, G, B, ERROR\n";
-        for (size_t i = 0; i < downsampled_cloud->size(); ++i) 
-        {
-            const auto& point = downsampled_cloud->points[i];
-            fout_points << i << " "
-                        << std::fixed << std::setprecision(6)
-                        << point.x << " " << point.y << " " << point.z << " "
-                        << static_cast<int>(point.r) << " "
-                        << static_cast<int>(point.g) << " "
-                        << static_cast<int>(point.b) << " "
-                        << 0 << std::endl;
-        }
+          const auto& point = downsampled_cloud->points[i];
+          fout_points << i << " "
+                      << std::fixed << std::setprecision(6)
+                      << point.x << " " << point.y << " " << point.z << " "
+                      << static_cast<int>(point.r) << " "
+                      << static_cast<int>(point.g) << " "
+                      << static_cast<int>(point.b) << " "
+                      << 0 << std::endl;
       }
+      std::cout << GREEN << "COLMAP points3D.txt saved with " << downsampled_cloud->size() << " points" << RESET << std::endl;
     }
-    else
-    {      
-      pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save_intensity);
-      std::cout << GREEN << "Raw point cloud data saved to: " << raw_points_dir 
-                << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
-    }
+  }
+  else if (pcd_save_en)
+  {
+    std::string raw_points_dir = output_dir + "pcd/all_raw_points.pcd";
+    constexpr float max_coord = 1e6f;
+    pcl_wait_save_intensity->points.erase(
+      std::remove_if(pcl_wait_save_intensity->points.begin(), pcl_wait_save_intensity->points.end(),
+        [max_coord](const PointType &p) {
+          return !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)
+              || std::abs(p.x) > max_coord || std::abs(p.y) > max_coord || std::abs(p.z) > max_coord;
+        }),
+      pcl_wait_save_intensity->points.end());
+    pcl_wait_save_intensity->width = pcl_wait_save_intensity->points.size();
+    pcl_wait_save_intensity->height = 1;
+
+    pcl::PCDWriter pcd_writer;
+    pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save_intensity);
+    std::cout << GREEN << "Raw point cloud data saved to: " << raw_points_dir 
+              << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
   }
 }
 
@@ -848,7 +1007,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   if (!imu_en) return;
 
   if (last_timestamp_lidar < 0.0) return;
-  RCLCPP_INFO(this->node->get_logger(), "get imu at time: %.6f", stamp2Sec(msg_in->header.stamp));
+  // RCLCPP_INFO(this->node->get_logger(), "get imu at time: %.6f", stamp2Sec(msg_in->header.stamp));
   sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
   msg->header.stamp = sec2Stamp(stamp2Sec(msg->header.stamp) - imu_time_offset);
   double timestamp = stamp2Sec(msg->header.stamp);
@@ -874,15 +1033,12 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   if (last_timestamp_imu > 0.0 && timestamp > last_timestamp_imu + 0.2)
   {
     RCLCPP_WARN(this->node->get_logger(), "imu time stamp Jumps %0.4lf seconds \n", timestamp - last_timestamp_imu);
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-    return;
   }
 
   last_timestamp_imu = timestamp;
 
   imu_buffer.push_back(msg);
-  cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
+  // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
   mtx_buffer.unlock();
   if (imu_prop_enable)
   {
@@ -897,9 +1053,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
 
 cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg)
 {
-  cv::Mat img;
-  img = cv_bridge::toCvShare(img_msg, "bgr8")->image;
-  return img;
+  return cv_bridge::toCvCopy(img_msg, "bgr8")->image;
 }
 
 // static int i = 0;
@@ -1049,9 +1203,6 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
       if (img_capture_time > lid_newest_time || img_capture_time > imu_newest_time)
       {
-        // RCLCPP_ERROR(this->node->get_logger(), "lost first camera frame");
-        // printf("img_capture_time, lid_newest_time, imu_newest_time: %lf , %lf
-        // , %lf \n", img_capture_time, lid_newest_time, imu_newest_time);
         return false;
       }
 
@@ -1277,7 +1428,7 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
   std::stringstream ss_time;
   ss_time << std::fixed << std::setprecision(6) << update_time;
 
-  if (pcd_save_en)
+  if (pcd_save_en || colmap_output_en)
   {
     static int scan_wait_num = 0;
 
@@ -1317,9 +1468,9 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
         scan_wait_num++;
         break;
     }
-    if ((pcl_wait_save->size() > 0 || pcl_wait_save_intensity->size() > 0) && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
+    if (pcd_save_en && (pcl_wait_save->size() > 0 || pcl_wait_save_intensity->size() > 0) && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
     {
-      string all_points_dir(string(string(ROOT_DIR) + "Log/pcd/") + ss_time.str() + string(".pcd"));
+      string all_points_dir(output_dir + "pcd/" + ss_time.str() + ".pcd");
 
       pcl::PCDWriter pcd_writer;
 
@@ -1337,7 +1488,7 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
       scan_wait_num = 0;
     }
     
-    if(LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO)
+    if(pcd_save_en && (LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO))
     {
       Eigen::Quaterniond q(_state.rot_end);
       fout_lidar_pos << std::fixed << std::setprecision(6);
@@ -1352,7 +1503,7 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
 
     if (img_save_interval > 0 && img_wait_num >= img_save_interval)
     {
-      imwrite(string(string(ROOT_DIR) + "Log/image/") + ss_time.str() + string(".png"), vio_manager->img_rgb);
+      imwrite(output_dir + "image/" + ss_time.str() + ".png", vio_manager->img_rgb);
       
       Eigen::Quaterniond q(_state.rot_end);
       fout_visual_pos << std::fixed << std::setprecision(6);

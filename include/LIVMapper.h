@@ -75,7 +75,11 @@ public:
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
   
   string root_dir;
+  string output_dir;
   string lid_topic, imu_topic, seq_name, img_topic;
+
+  bool multicam_enabled = false;
+  int num_extra_cameras = 0;
   V3D extT;
   M3D extR;
 
@@ -170,6 +174,7 @@ public:
   std::shared_ptr<rclcpp::SubscriptionBase> sub_pcl;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> extra_img_subs;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubNormal;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubSubVisualMap;

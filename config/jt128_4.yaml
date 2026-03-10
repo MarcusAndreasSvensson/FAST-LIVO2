@@ -1,0 +1,192 @@
+/**:
+  ros__parameters:
+    common:
+      img_topic: "/camera_top/image_raw" # MIPI RX2
+      lid_topic: "/lidar_points"
+      imu_topic: "/lidar_imu"
+      img_en: 1
+      lidar_en: 1
+      ros_driver_bug_fix: false
+      output_dir: "/mnt/nvme/livo_output/"
+
+    extrin_calib:
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      Rcl: [ 0.999958, -0.005030,  0.007718,
+            0.004932,  0.999907,  0.012708,
+            -0.007781, -0.012669,  0.999889]
+      Pcl: [-0.005948, 0.057458, -0.004583]
+
+    time_offset: 
+      imu_time_offset: 0.0
+      img_time_offset: 0.1
+      exposure_time_init: 0.0
+
+    preprocess:
+      point_filter_num: 1
+      # point_filter_num: 2
+      # point_filter_num: 4
+      # filter_size_surf: 0.15
+      filter_size_surf: 0.1
+      # filter_size_surf: 0.2
+      lidar_type: 6 # Hesai Pandar128 / JT128
+      scan_line: 128
+      blind: 0.3
+      # blind: 0.6 # Base
+      # blind: 0.1
+      # blind: 0.8
+
+    vio:
+      max_iterations: 5
+      outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+      # img_point_cov: 100 # Base
+      img_point_cov: 1000 # 100 1000 
+      patch_size: 8
+      patch_pyrimid_level: 4
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      # acc_cov: 20.0 # 0.2
+      # gyr_cov: 10.0 # 0.5
+      # acc_cov: 0.5 # 0.2
+      # gyr_cov: 0.3 # 0.5
+      acc_cov: 0.5 # Base
+      gyr_cov: 0.3 # Base
+      b_acc_cov: 0.0001 # 0.1
+      b_gyr_cov: 0.0001 # 0.1
+
+    lio:
+      max_iterations: 5 # Base
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025 # Base
+      # min_eigen_value: 0.0025 # 0.005
+      voxel_size: 0.3
+      # voxel_size: 0.5
+      max_layer: 3
+      # max_layer: 2
+      max_points_num: 100
+      # max_points_num: 50 #Base
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:  
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: true
+
+    publish:
+      dense_map_en: false
+      pub_effect_point_en: true 
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "CBD_Building_01"
+      pose_output_en: false
+
+    pcd_save:
+      pcd_save_en: true
+      type: 0 # 0: World Frame, 1: Body Frame;
+      colmap_output_en: true # need to set interval = -1
+      filter_size_pcd: 0.15
+      interval: -1
+      # how many LiDAR frames saved in each pcd file;
+      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+    image_save:
+      img_save_en: false
+      interval: 1
+
+    # Multi-camera COLMAP export.
+    # VIO runs only on the primary camera (img_topic above).
+    # Extra cameras are subscribed and their images/poses dumped to COLMAP output.
+    #
+    # Rcl: rotation from lidar frame to camera optical frame (row-major, 9 values).
+    # Pcl: translation component of the lidar-to-camera transform (3 values, metres).
+    #
+    # Conversion from calibration tool T_lidar_camera [tx,ty,tz, qx,qy,qz,qw]
+    # (camera pose in lidar frame):
+    #   R_lc = quat_to_matrix(qx,qy,qz,qw)
+    #   Rcl  = R_lc^T
+    #   Pcl  = -Rcl @ [tx,ty,tz]
+
+    # RX0 + RX1 in sync (Group 0)
+    # RX2 + RX3 in sync (Group 1)
+    # 1 frame delay between Group 0 and Group 1
+    # Group 0 trigger first -> 1 frame delay -> Group 1 trigger
+
+    multicam:
+      enabled: true
+      num_extra_cameras: 3
+
+      # camera_front_left: 540x960 (calibrated 2026-03-05)
+      cam_0_name: "front_left"
+      cam_0_img_topic: "/camera_front_left/image_raw" # MIPI RX0
+      cam_0_Rcl: [ 0.999997, -0.000186,  0.002271,
+                   0.000208,  0.999950, -0.010035,
+                  -0.002269,  0.010035,  0.999947]
+      cam_0_Pcl: [0.029150, -0.050668, -0.020620]
+      cam_0_cam_width: 540
+      cam_0_cam_height: 960
+      cam_0_cam_fx: 565.694912
+      cam_0_cam_fy: 572.640745
+      cam_0_cam_cx: 300.716223
+      cam_0_cam_cy: 479.751679
+      cam_0_cam_d0: 0.022458
+      cam_0_cam_d1: -0.042635
+      cam_0_cam_d2: 0.000298
+      cam_0_cam_d3: 0.000102
+      cam_0_img_time_offset: 0.0
+
+      # camera_left: 540x960 (calibrated 2026-03-05)
+      cam_1_name: "left"
+      cam_1_img_topic: "/camera_left/image_raw" # MIPI RX1
+      cam_1_Rcl: [-0.026938,  0.006378,  0.999617,
+                  -0.033713,  0.999405, -0.007285,
+                  -0.999068, -0.033896, -0.026707]
+      cam_1_Pcl: [0.029108, -0.100983, -0.049789]
+      cam_1_cam_width: 540
+      cam_1_cam_height: 960
+      cam_1_cam_fx: 568.140267
+      cam_1_cam_fy: 569.764559
+      cam_1_cam_cx: 238.470120
+      cam_1_cam_cy: 469.283782
+      cam_1_cam_d0: 0.015694
+      cam_1_cam_d1: -0.031963
+      cam_1_cam_d2: -0.002361
+      cam_1_cam_d3: -0.002610
+      cam_1_img_time_offset: 0.0
+
+      # camera_right: 540x960 (calibrated 2026-03-05)
+      # NOTE: calibration translation was an outlier (t_x=0.209m, expected ~0.049m).
+      # Using calibrated rotation but nominal Pcl. Bundle adjustment will refine.
+      cam_2_name: "right"
+      cam_2_img_topic: "/camera_right/image_raw" # MIPI RX3
+      cam_2_Rcl: [ 0.006012,  0.012716, -0.999901,
+                   0.017668,  0.999762,  0.012820,
+                   0.999826, -0.017743,  0.005786]
+      cam_2_Pcl: [0.0489, 0.0598, -0.0463]
+      cam_2_cam_width: 540
+      cam_2_cam_height: 960
+      cam_2_cam_fx: 563.795114
+      cam_2_cam_fy: 568.469457
+      cam_2_cam_cx: 303.899762
+      cam_2_cam_cy: 481.636971
+      cam_2_cam_d0: 0.004585
+      cam_2_cam_d1: -0.025499
+      cam_2_cam_d2: 0.001361
+      cam_2_cam_d3: 0.001325
+      cam_2_img_time_offset: 0.0 # Same as primary camera

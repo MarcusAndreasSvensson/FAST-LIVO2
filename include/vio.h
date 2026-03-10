@@ -18,10 +18,34 @@ which is included as part of this source code package.
 #include <opencv2/imgproc/imgproc_c.h>
 #include <pcl/filters/voxel_grid.h>
 #include <set>
+#include <deque>
+#include <mutex>
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
+#include <vikit/abstract_camera.h>
 #include <vikit/pinhole_camera.h>
+
+struct ExtraCamera
+{
+  std::string name;
+  std::string img_topic;
+  vk::AbstractCamera *cam = nullptr;
+  double fx = 0, fy = 0, cx = 0, cy = 0;
+  int width = 0, height = 0;
+  double img_time_offset = 0.0;
+  M3D Rcl, Rci;
+  V3D Pcl, Pci;
+  std::deque<cv::Mat> img_buffer;
+  std::deque<double> img_time_buffer;
+
+  ExtraCamera() { Rcl.setIdentity(); Rci.setIdentity(); Pcl.setZero(); Pci.setZero(); }
+  ~ExtraCamera() { if (cam) { delete cam; cam = nullptr; } }
+
+  ExtraCamera(const ExtraCamera &) = delete;
+  ExtraCamera &operator=(const ExtraCamera &) = delete;
+  ExtraCamera(ExtraCamera &&) = default;
+};
 
 struct SubSparseMap
 {
@@ -85,7 +109,6 @@ class VIOManager
 public:
   int grid_size;
   vk::AbstractCamera *cam;
-  vk::PinholeCamera *pinhole_cam;
   StatesGroup *state;
   StatesGroup *state_propagat;
   M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
@@ -99,6 +122,7 @@ public:
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
+  string output_dir;
 
   int width, height, grid_n_width, grid_n_height, length;
   double image_resize_factor;
@@ -117,7 +141,12 @@ public:
   // double ave_ekf_time = 0;
 
   int frame_count = 0;
+  int colmap_frame_num = 0;
+  int num_total_cameras = 1;
   bool plot_flag;
+
+  std::vector<std::unique_ptr<ExtraCamera>> extra_cameras;
+  std::mutex extra_cam_mtx;
 
   Eigen::Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
   Eigen::MatrixXd K, H_sub_inv;
@@ -166,7 +195,9 @@ public:
   void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void precomputeReferencePatches(int level);
+  void finalizeColmapSetup();
   void dumpDataForColmap();
+  void dumpExtraCamerasForColmap(const StatesGroup &state, double vio_time);
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
   int getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level);
   V3F getInterpolatedPixel(cv::Mat img, V2D pc);
